@@ -1,0 +1,55 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+    function wsPath(wid) {
+      return /databases/$(database)/documents/workspaces/$(wid);
+    }
+    function isMember(wid) {
+      return signedIn() && exists(/databases/$(database)/documents/workspaces/$(wid)/members/$(request.auth.uid));
+    }
+    function isOwner(wid) {
+      return isMember(wid) &&
+        get(/databases/$(database)/documents/workspaces/$(wid)/members/$(request.auth.uid)).data.role == 'owner';
+    }
+
+    match /workspaces/{wid} {
+      // ใครก็ได้ที่ล็อกอิน (anonymous) สร้างกิจการใหม่ได้ โดยต้องเป็นเจ้าของเอง
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid;
+      // เฉพาะเจ้าของเท่านั้นที่อ่านรหัสเชิญและแก้ไขกิจการได้
+      allow read, update, delete: if isOwner(wid);
+
+      match /members/{uid} {
+        allow read: if signedIn() && (request.auth.uid == uid || isOwner(wid));
+
+        // สร้างสมาชิก: เจ้าของสร้างตัวเอง หรือพนักงานที่ใส่รหัสเชิญถูกต้อง
+        allow create: if signedIn() && request.auth.uid == uid && (
+          (request.resource.data.role == 'owner' &&
+            get(wsPath(wid)).data.ownerUid == request.auth.uid)
+          ||
+          (request.resource.data.role == 'staff' &&
+            request.resource.data.inviteCode == get(wsPath(wid)).data.inviteCode)
+        );
+
+        // พนักงานเดิมเข้าร่วมซ้ำได้ (ต้องเป็น staff และรหัสเชิญถูกต้อง) / เจ้าของแก้ไขได้ทุกคน
+        allow update: if isOwner(wid) || (
+          signedIn() && request.auth.uid == uid &&
+          resource.data.role == 'staff' &&
+          request.resource.data.role == 'staff' &&
+          request.resource.data.inviteCode == get(wsPath(wid)).data.inviteCode
+        );
+
+        allow delete: if isOwner(wid);
+      }
+
+      // ข้อมูลบัญชี: สมาชิกอ่าน/เขียนได้ เฉพาะ 5 ตารางนี้ (ไม่รวม members)
+      match /{table}/{docId} {
+        allow read, write: if isMember(wid) &&
+          table in ['farmers', 'plowing', 'harvesting', 'supplies', 'labor'];
+      }
+    }
+  }
+}
